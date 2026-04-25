@@ -2,7 +2,7 @@
 
 This repository contains our implementations and experiments related to ANS, for our KiK (Coding and Cryptography) project.
 
-For this project, we decided to implement entropy compression based on ANS created by Dr. Jarek Duda. This algorithm combines the speed of Huffman coding with the compression ratio of arithmetic coding.
+For this project, we decided to implement entropy compression based on ANS created by Jarek Duda, Ph.D. This algorithm combines the speed of Huffman coding with the compression ratio of arithmetic coding.
 
 ### Architecture of the rANS (Range ANS) variant
 
@@ -66,7 +66,7 @@ The Silesia Corpus is a collection of files that covers common data types used t
 | **x-ray** | X-ray medical picture | picture | Hospital image | 8,474,240 | 4,051,112 |
 | **Total** | | | | **211,938,580** | **54,506,808** |
 
-### Source materials
+## Source materials
 * **[Original Paper by Jarek Duda](https://arxiv.org/pdf/1311.2540)**: *Asymmetric numeral systems: entropy coding combining speed of Huffman coding with compression rate of arithmetic coding* 
 * **[A comprehensive 50-minute video presentation by Jarek Duda explaining the core concepts](https://www.youtube.com/watch?v=R5PeBBQw190)**: *Introduction to Asymmetric Numeral Systems*
 * **[Wikipedia Overview](https://en.wikipedia.org/wiki/Asymmetric_numeral_systems)**
