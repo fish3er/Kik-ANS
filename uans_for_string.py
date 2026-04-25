@@ -15,12 +15,12 @@ def prepare_model(data):
     
     # Zwracamy paczkę danych potrzebnych do obu procesów
     return {
-        'f': f, 
-        'cum': cum, 
-        'M': M, 
-        'symbols': symbols, 
-        's_to_idx': s_to_idx,
-        'length': len(data)
+        'f': f,              # Częstotliwości (wystąpienia) każdego symbolu w danych
+        'cum': cum,          # Skumulowane częstotliwości (punkty startowe przedziałów dla symboli)
+        'M': M,              # Suma wszystkich wystąpień (rozmiar alfabetu/puli stanów)
+        'symbols': symbols,  # Unikalne symbole posortowane alfabetycznie (mapowanie indeks -> znak)
+        's_to_idx': s_to_idx, # Słownik mapujący konkretny znak na jego indeks w listach f i cum
+        'length': len(data)   # Całkowita liczba znaków w oryginale (niezbędna do poprawnego dekodowania)
     }
 
 def ans_encode(data, model):
