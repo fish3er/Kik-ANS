@@ -70,10 +70,11 @@ def ans_decode(state, model):
 
 # --- PRZYKŁAD UŻYCIA ---
 
-wiadomosc = "abracadabra"
-print("Początkowa wiad: ", wiadomosc)
+wiadomosc = "aab"
+#print("Początkowa wiad: ", wiadomosc)
 # 1. Tworzymy model na podstawie wiadomości
 model = prepare_model(wiadomosc)
+print(model)
 
 # 2. Kodujemy
 zakodowana_liczba = ans_encode(wiadomosc, model)
@@ -81,4 +82,4 @@ print(f"Zakodowany stan: {zakodowana_liczba}")
 
 # 3. Dekodujemy
 odkodowana_wiadomosc = ans_decode(zakodowana_liczba, model)
-print(f"Odkodowana wiadomość: {odkodowana_wiadomosc}")
+#print(f"Odkodowana wiadomość: {odkodowana_wiadomosc}")
