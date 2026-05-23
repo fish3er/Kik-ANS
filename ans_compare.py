@@ -1,5 +1,6 @@
 import collections
 import os
+import time
 
 # ── Shared frequency model (same scaling as rans.py) ─────────────────────────
 
@@ -198,17 +199,28 @@ def tans_decompress(state, bits, f, cum, length, m_bits=12):
 
 # ── Comparison runner ─────────────────────────────────────────────────────────
 
+def _ms(t): return t * 1000.0
+
 def run_comparison(folder_path="./silesia"):
     if not os.path.exists(folder_path):
         print(f"Folder '{folder_path}' not found.")
         return
 
-    header = (f"{'File':<15} | {'Original':>10} | "
-              f"{'rANS':>10} | {'rANS%':>6} | "
-              f"{'uANS':>10} | {'uANS%':>6} | "
-              f"{'tANS':>10} | {'tANS%':>6}")
-    print(header)
-    print("-" * len(header))
+    col = 15
+    # Two-line header: method names on top, sub-columns below
+    print(f"{'File':<{col}} | {'Original':>10} | "
+          f"{'-- rANS (byte renorm) --':^30} | "
+          f"{'-- uANS (bit renorm) ---':^30} | "
+          f"{'-- tANS (Duda spread) --':^30}")
+    print(f"{'':^{col}} | {'':>10} | "
+          f"{'Size':>8}  {'Ratio':>6}  {'Enc ms':>7}  {'Dec ms':>7} | "
+          f"{'Size':>8}  {'Ratio':>6}  {'Enc ms':>7}  {'Dec ms':>7} | "
+          f"{'Size':>8}  {'Ratio':>6}  {'Enc ms':>7}  {'Dec ms':>7}")
+    sep = "-" * (col + 3 + 12 + 3 + 34 + 3 + 34 + 3 + 34)
+    print(sep)
+
+    totals = {k: [0.0, 0.0, 0.0, 0.0, 0.0, 0.0] for k in ("r", "u", "t")}
+    file_count = 0
 
     for fname in sorted(os.listdir(folder_path)):
         fpath = os.path.join(folder_path, fname)
@@ -223,30 +235,70 @@ def run_comparison(folder_path="./silesia"):
         f, cum = build_model(data)
 
         # rANS
+        t0 = time.perf_counter()
         rs, rstream = rans_compress(data, f, cum)
+        r_enc = _ms(time.perf_counter() - t0)
         r_size = 8 + len(rstream) + 256
+        t0 = time.perf_counter()
         r_ok = "OK" if rans_decompress(rs, rstream, f, cum, orig) == data else "ERR"
+        r_dec = _ms(time.perf_counter() - t0)
 
         # uANS
+        t0 = time.perf_counter()
         us, ubits = uans_compress(data, f, cum)
+        u_enc = _ms(time.perf_counter() - t0)
         u_size = 8 + (len(ubits) + 7) // 8 + 256
+        t0 = time.perf_counter()
         u_ok = "OK" if uans_decompress(us, ubits, f, cum, orig) == data else "ERR"
+        u_dec = _ms(time.perf_counter() - t0)
 
         # tANS
+        t0 = time.perf_counter()
         ts, tbits = tans_compress(data, f, cum)
+        t_enc = _ms(time.perf_counter() - t0)
         t_size = 8 + (len(tbits) + 7) // 8 + 256
+        t0 = time.perf_counter()
         t_ok = "OK" if tans_decompress(ts, tbits, f, cum, orig) == data else "ERR"
+        t_dec = _ms(time.perf_counter() - t0)
 
         print(
-            f"{fname[:15]:<15} | {orig:>10} | "
-            f"{r_size:>8} {r_ok} | {r_size/orig*100:>5.2f}% | "
-            f"{u_size:>8} {u_ok} | {u_size/orig*100:>5.2f}% | "
-            f"{t_size:>8} {t_ok} | {t_size/orig*100:>5.2f}%"
+            f"{fname[:col]:<{col}} | {orig:>10} | "
+            f"{r_size:>8}  {r_size/orig*100:>5.2f}%  {r_enc:>7.1f}  {r_dec:>7.1f} | "
+            f"{u_size:>8}  {u_size/orig*100:>5.2f}%  {u_enc:>7.1f}  {u_dec:>7.1f} | "
+            f"{t_size:>8}  {t_size/orig*100:>5.2f}%  {t_enc:>7.1f}  {t_dec:>7.1f}"
         )
 
+        for vals, enc, dec in (
+            (totals["r"], r_enc, r_dec),
+            (totals["u"], u_enc, u_dec),
+            (totals["t"], t_enc, t_dec),
+        ):
+            vals[0] += r_size; vals[1] += u_size; vals[2] += t_size
+            vals[3] += enc;    vals[4] += dec
+
+        totals["r"][3] += r_enc; totals["r"][4] += r_dec
+        totals["u"][3] += u_enc; totals["u"][4] += u_dec
+        totals["t"][3] += t_enc; totals["t"][4] += t_dec
+        file_count += 1
+
+    # Averages
+    print(sep)
+    n = file_count or 1
+    r_enc_avg = totals["r"][3] / n
+    r_dec_avg = totals["r"][4] / n
+    u_enc_avg = totals["u"][3] / n
+    u_dec_avg = totals["u"][4] / n
+    t_enc_avg = totals["t"][3] / n
+    t_dec_avg = totals["t"][4] / n
+    print(
+        f"{'AVG':^{col}} | {'':>10} | "
+        f"{'':>8}  {'':>6}   {r_enc_avg:>7.1f}  {r_dec_avg:>7.1f} | "
+        f"{'':>8}  {'':>6}   {u_enc_avg:>7.1f}  {u_dec_avg:>7.1f} | "
+        f"{'':>8}  {'':>6}   {t_enc_avg:>7.1f}  {t_dec_avg:>7.1f}"
+    )
     print()
-    print("Note: uANS and tANS use bit-level renorm; rANS uses byte-level.")
-    print("      tANS is equivalent to uANS but uses precomputed encode/decode tables.")
+    print("Note: rANS uses byte-level renorm; uANS/tANS use bit-level renorm.")
+    print("      tANS uses Duda step spread (golden-ratio interleaving).")
 
 
 run_comparison("./silesia")
