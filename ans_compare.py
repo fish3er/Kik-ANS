@@ -1,8 +1,9 @@
 import collections
 import os
+import sys
 import time
 
-# ── Shared frequency model (same scaling as rans.py) ─────────────────────────
+# ── Shared frequency model ────────────────────────────────────────────────────
 
 def build_model(data, m_bits=12):
     M = 1 << m_bits
@@ -27,48 +28,49 @@ def build_model(data, m_bits=12):
     return f, cum
 
 
-# ── rANS: byte-level renormalization (from rans.py) ──────────────────────────
+# FIX 2: rANS now uses bit-level renorm (same as uANS/tANS) so all three
+# methods differ only in ANS arithmetic vs table lookup, not renorm strategy.
+# ── rANS: bit-level renormalization ──────────────────────────────────────────
 
 def rans_compress(data, f, cum, m_bits=12):
     M = 1 << m_bits
-    L = 1 << 16
-    state = L
-    stream = []
+    state = M
+    bits = []
     for byte in data:
         freq = f[byte]
-        limit = (L // M) * freq * 256
-        while state >= limit:
-            stream.append(state & 0xFF)
-            state >>= 8
-        state = (state // freq) * M + (state % freq) + cum[byte]
-    return state, stream
+        x = state
+        # FIX 2: bit renorm replaces former byte renorm loop
+        while x >= 2 * freq:
+            bits.append(x & 1)
+            x >>= 1
+        state = (x // freq) * M + (x % freq) + cum[byte]
+    return state, bits
 
-def rans_decompress(state, stream, f, cum, length, m_bits=12):
+def rans_decompress(state, bits, f, cum, length, m_bits=12):
     M = 1 << m_bits
-    L = 1 << 16
     lookup = [0] * M
     for s in range(256):
         for i in range(cum[s], cum[s+1]):
             lookup[i] = s
     decoded = bytearray()
-    ptr = len(stream) - 1
+    ptr = len(bits) - 1
     for _ in range(length):
-        slot = state % M
+        # FIX 2: state always in [M, 2M) after bit renorm; slot = state - M
+        slot = state - M
         s = lookup[slot]
         decoded.append(s)
-        state = f[s] * (state // M) + (slot - cum[s])
-        while state < L and ptr >= 0:
-            state = (state << 8) | stream[ptr]
-            ptr -= 1
+        x = f[s] + (slot - cum[s])
+        nb = (m_bits + 1) - x.bit_length()
+        bits_val = 0
+        for i in range(nb - 1, -1, -1):
+            if ptr >= 0:
+                bits_val |= bits[ptr] << i
+                ptr -= 1
+        state = (x << nb) | bits_val
     return bytes(decoded[::-1])
 
 
 # ── uANS: bit-level renormalization ──────────────────────────────────────────
-#
-# Uses the same ANS formula as rANS but renormalises one bit at a time.
-# State is kept in [M, 2M) by emitting/consuming individual bits.
-# Compression should be slightly tighter than byte renorm since we never
-# waste up to 7 bits of alignment per renorm step.
 
 def uans_compress(data, f, cum, m_bits=12):
     M = 1 << m_bits
@@ -77,11 +79,9 @@ def uans_compress(data, f, cum, m_bits=12):
     for byte in data:
         freq = f[byte]
         x = state
-        # renorm: shift x into [freq, 2*freq) emitting LSBs
         while x >= 2 * freq:
             bits.append(x & 1)
             x >>= 1
-        # ANS step (x // freq == 1 here, so: M + cum + offset)
         state = M + cum[byte] + (x - freq)
     return state, bits
 
@@ -97,9 +97,7 @@ def uans_decompress(state, bits, f, cum, length, m_bits=12):
         slot = state - M
         s = sym_of_slot[slot]
         decoded.append(s)
-        # recover pre-renorm state: x is the renormed value the encoder had
         x = f[s] + (slot - cum[s])
-        # nb bits were emitted to reach x from the original state
         nb = (m_bits + 1) - x.bit_length()
         bits_val = 0
         for i in range(nb - 1, -1, -1):
@@ -111,31 +109,18 @@ def uans_decompress(state, bits, f, cum, length, m_bits=12):
 
 
 # ── tANS: table ANS with precomputed decode/encode tables ────────────────────
-#
-# Uses sequential spread (symbol s occupies slots cum[s]..cum[s+1]-1).
-# Decode table maps slot -> (symbol, nb_bits, new_state_base) avoiding
-# all arithmetic in the hot loop. Encode table maps (s, x_renorm) -> new_state.
 
 def _tans_build_tables(f, cum, m_bits=12):
     M = 1 << m_bits
 
-    # Duda step spread: visit all M slots in a pseudo-random order.
-    # step must be coprime with M=2^k, so any odd number works.
-    # 0.618*M (golden-ratio fraction) gives good symbol interleaving.
-    step = int(M * 0.6180339887)
-    if step % 2 == 0:
-        step += 1
-    sym_of_slot = [-1] * M
-    pos = 0
+    # FIX 3: sequential spread (symbol s occupies slots cum[s]..cum[s+1]-1)
+    # replaces the golden-ratio step spread so the only variable vs uANS is
+    # table lookup vs arithmetic in the hot loop.
+    sym_of_slot = [0] * M
     for s in range(256):
-        for _ in range(f[s]):
-            sym_of_slot[pos] = s
-            pos = (pos + step) % M
+        for i in range(cum[s], cum[s+1]):
+            sym_of_slot[i] = s
 
-    # Decode table: dtable[slot] -> (symbol, nb_bits, new_state_base)
-    # next_x[s] counts up from f[s]; the k-th time symbol s appears in the
-    # spread it gets pre-renorm value f[s]+k, which encodes how many bits
-    # the encoder consumed to reach that slot.
     dtable_nb   = [0] * M
     dtable_base = [0] * M
     next_x = list(f)
@@ -147,9 +132,6 @@ def _tans_build_tables(f, cum, m_bits=12):
         dtable_base[slot] = x << nb
         next_x[s] += 1
 
-    # Encode table: etable[s][x - f[s]] = new_state, for x in [f[s], 2*f[s]).
-    # Built by inverting the decode table: the slot that has pre-renorm value x
-    # for symbol s is the new state for encoding (s, x).
     etable = [None] * 256
     for s in range(256):
         if f[s] > 0:
@@ -157,7 +139,7 @@ def _tans_build_tables(f, cum, m_bits=12):
     next_x = list(f)
     for slot in range(M):
         s = sym_of_slot[slot]
-        x = next_x[s]          # same x as in decode table construction
+        x = next_x[s]
         etable[s][x - f[s]] = M + slot
         next_x[s] += 1
 
@@ -207,11 +189,10 @@ def run_comparison(folder_path="./silesia"):
         return
 
     col = 15
-    # Two-line header: method names on top, sub-columns below
     print(f"{'File':<{col}} | {'Original':>10} | "
-          f"{'-- rANS (byte renorm) --':^30} | "
+          f"{'-- rANS (bit renorm) ---':^30} | "
           f"{'-- uANS (bit renorm) ---':^30} | "
-          f"{'-- tANS (Duda spread) --':^30}")
+          f"{'-- tANS (seq spread) ---':^30}")
     print(f"{'':^{col}} | {'':>10} | "
           f"{'Size':>8}  {'Ratio':>6}  {'Enc ms':>7}  {'Dec ms':>7} | "
           f"{'Size':>8}  {'Ratio':>6}  {'Enc ms':>7}  {'Dec ms':>7} | "
@@ -219,7 +200,8 @@ def run_comparison(folder_path="./silesia"):
     sep = "-" * (col + 3 + 12 + 3 + 34 + 3 + 34 + 3 + 34)
     print(sep)
 
-    totals = {k: [0.0, 0.0, 0.0, 0.0, 0.0, 0.0] for k in ("r", "u", "t")}
+    # FIX 1: simplified totals — only track enc/dec times per method
+    totals = {k: [0.0, 0.0] for k in ("r", "u", "t")}
     file_count = 0
 
     for fname in sorted(os.listdir(folder_path)):
@@ -232,22 +214,25 @@ def run_comparison(folder_path="./silesia"):
             continue
 
         orig = len(data)
+        print(f"  {fname} ({orig / 1e6:.1f} MB) ...", end="", file=sys.stderr, flush=True)
         f, cum = build_model(data)
 
         # rANS
         t0 = time.perf_counter()
-        rs, rstream = rans_compress(data, f, cum)
+        rs, rbits = rans_compress(data, f, cum)
         r_enc = _ms(time.perf_counter() - t0)
-        r_size = 8 + len(rstream) + 256
+        # FIX 4: variable-length final state size instead of hardcoded 8 bytes
+        r_size = max(1, (rs.bit_length() + 7) // 8) + (len(rbits) + 7) // 8 + 256
         t0 = time.perf_counter()
-        r_ok = "OK" if rans_decompress(rs, rstream, f, cum, orig) == data else "ERR"
+        r_ok = "OK" if rans_decompress(rs, rbits, f, cum, orig) == data else "ERR"
         r_dec = _ms(time.perf_counter() - t0)
 
         # uANS
         t0 = time.perf_counter()
         us, ubits = uans_compress(data, f, cum)
         u_enc = _ms(time.perf_counter() - t0)
-        u_size = 8 + (len(ubits) + 7) // 8 + 256
+        # FIX 4: variable-length final state size
+        u_size = max(1, (us.bit_length() + 7) // 8) + (len(ubits) + 7) // 8 + 256
         t0 = time.perf_counter()
         u_ok = "OK" if uans_decompress(us, ubits, f, cum, orig) == data else "ERR"
         u_dec = _ms(time.perf_counter() - t0)
@@ -256,10 +241,17 @@ def run_comparison(folder_path="./silesia"):
         t0 = time.perf_counter()
         ts, tbits = tans_compress(data, f, cum)
         t_enc = _ms(time.perf_counter() - t0)
-        t_size = 8 + (len(tbits) + 7) // 8 + 256
+        # FIX 4: variable-length final state size
+        t_size = max(1, (ts.bit_length() + 7) // 8) + (len(tbits) + 7) // 8 + 256
         t0 = time.perf_counter()
         t_ok = "OK" if tans_decompress(ts, tbits, f, cum, orig) == data else "ERR"
         t_dec = _ms(time.perf_counter() - t0)
+
+        total_enc_ms = r_enc + u_enc + t_enc
+        print(f" {total_enc_ms / 1000:.1f}s", file=sys.stderr)
+        if total_enc_ms > 30_000:
+            print(f"  WARNING: {fname} encoding took {total_enc_ms:.0f} ms (>{30_000} ms threshold)",
+                  file=sys.stderr)
 
         print(
             f"{fname[:col]:<{col}} | {orig:>10} | "
@@ -267,29 +259,20 @@ def run_comparison(folder_path="./silesia"):
             f"{u_size:>8}  {u_size/orig*100:>5.2f}%  {u_enc:>7.1f}  {u_dec:>7.1f} | "
             f"{t_size:>8}  {t_size/orig*100:>5.2f}%  {t_enc:>7.1f}  {t_dec:>7.1f}"
         )
+        sys.stdout.flush()
 
-        for vals, enc, dec in (
-            (totals["r"], r_enc, r_dec),
-            (totals["u"], u_enc, u_dec),
-            (totals["t"], t_enc, t_dec),
-        ):
-            vals[0] += r_size; vals[1] += u_size; vals[2] += t_size
-            vals[3] += enc;    vals[4] += dec
-
-        totals["r"][3] += r_enc; totals["r"][4] += r_dec
-        totals["u"][3] += u_enc; totals["u"][4] += u_dec
-        totals["t"][3] += t_enc; totals["t"][4] += t_dec
+        # FIX 1: single accumulation pass, no duplicate block after loop
+        for k, enc, dec in (("r", r_enc, r_dec), ("u", u_enc, u_dec), ("t", t_enc, t_dec)):
+            totals[k][0] += enc
+            totals[k][1] += dec
         file_count += 1
 
-    # Averages
     print(sep)
     n = file_count or 1
-    r_enc_avg = totals["r"][3] / n
-    r_dec_avg = totals["r"][4] / n
-    u_enc_avg = totals["u"][3] / n
-    u_dec_avg = totals["u"][4] / n
-    t_enc_avg = totals["t"][3] / n
-    t_dec_avg = totals["t"][4] / n
+    # FIX 1: index into simplified [enc, dec] totals
+    r_enc_avg, r_dec_avg = totals["r"][0] / n, totals["r"][1] / n
+    u_enc_avg, u_dec_avg = totals["u"][0] / n, totals["u"][1] / n
+    t_enc_avg, t_dec_avg = totals["t"][0] / n, totals["t"][1] / n
     print(
         f"{'AVG':^{col}} | {'':>10} | "
         f"{'':>8}  {'':>6}   {r_enc_avg:>7.1f}  {r_dec_avg:>7.1f} | "
@@ -297,8 +280,9 @@ def run_comparison(folder_path="./silesia"):
         f"{'':>8}  {'':>6}   {t_enc_avg:>7.1f}  {t_dec_avg:>7.1f}"
     )
     print()
-    print("Note: rANS uses byte-level renorm; uANS/tANS use bit-level renorm.")
-    print("      tANS uses Duda step spread (golden-ratio interleaving).")
+    print("All three methods use bit-level renorm.")
+    print("rANS: division-based ANS step. uANS: simplified step (x in [freq,2freq)).")
+    print("tANS: precomputed encode/decode tables, sequential slot spread.")
 
 
 run_comparison("./silesia")
